@@ -37,6 +37,7 @@ Fixed locations:
 - `claude plugin test .` — runs `tests/*.test.tsx`.
 - Type check: `tsc -p .` once the engine has laid `.claude-plugin/types/` (it does on load); otherwise a scratch tsconfig per the header of the plugin-authoring skill's `claude-code.d.ts`. No global `tsc`: use `npx -p typescript@5.6.3 tsc` with `npm_config_cache=$TMPDIR/npm-cache` (the sandbox blocks `~/.npm`).
 - Try it live: `claude --plugin-dir .` from this folder.
+- Release: bump `version` in `.claude-plugin/plugin.json` (update compares versions, not commits), push, then `claude plugin marketplace update work-tree-panel` and `claude plugin update work-tree-panel@work-tree-panel` (both need the sandbox off; restart to apply). Installed from the private repo `trishussey-personal/work-tree-panel` at user scope.
 - Default autonomy: for a well-scoped task, plan it, build it, validate it, and report back. Do not check in mid-task on implementation details that do not change the request's scope.
 
 ## Lab notes: what not to do
