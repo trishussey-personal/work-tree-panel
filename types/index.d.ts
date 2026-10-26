@@ -13,6 +13,8 @@ export type GitSnapshot = {
   changes: Record<string, string>
   // Every changed path in the repo, including those outside the working directory.
   total: number
+  // Why the snapshot is partial or stale; empty when it is whole and current.
+  note: string
 }
 
 declare module 'claude-code' {

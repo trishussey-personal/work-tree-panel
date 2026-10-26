@@ -45,3 +45,6 @@ Fixed locations:
 - 2026-10-25: Bash in the sandbox can't write to `~/.claude/dev-mods/`, where a hot-reloading session copy of the mod lives. Edit those files with the Edit/Write tools, not sed or python.
 - 2026-10-25: Don't assume `git status --porcelain` puts renames only in the first (X) column. An unstaged rename after `git add -N` is ` R new\0old`, so check both columns before skipping the original path. Check for unmerged codes (`U` in either column, `AA`, `DD`) before any "D wins" rule.
 - 2026-10-25: Don't gate background work on `e.isInteractive` alone; the desktop app may attach a surface while not counting as interactive. Use `e.isInteractive || e.surface !== null`, and start polling from the command too.
+- 2026-10-25: Don't type `\u` escapes for invisible characters (bidi overrides, U+FFFD) through the Edit/Write tools; they land in the file as the raw characters. Write those lines with a python script instead, and check with `LC_ALL=C grep -nP '[^\x00-\x7f]'`.
+- 2026-10-25: Don't test the mod's git argument lists in zsh with `$VAR` expansion; zsh doesn't word-split, so git gets one bad argument. Use bash arrays.
+- 2026-10-25: Security audit run; 4 findings before public plus 5 hardening; report at `active/security/audit-2026-10-25.md`.

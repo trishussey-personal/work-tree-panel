@@ -37,6 +37,8 @@ Copying uses your system's clipboard tool, or the OSC 52 escape code over SSH, w
 ## Limits
 
 - Symlinked folders show as files and can't be expanded.
+- A name holding control characters (a newline, an escape) or text-direction overrides is shown with `�` in their place, and its path is not copied: pasted into a shell, it could run more than you see.
+- Git runs with settings that would let a repo run commands switched off (fsmonitor, filter drivers, signature checks) and without taking `.git/index.lock`, so the background refresh never blocks your own git commands. It refreshes only while the pane is on screen.
 - Very large expanded trees are cut off at about 2,000 rows, with a note asking you to collapse a folder.
 - Which folders are expanded is remembered for the session, not across sessions.
 

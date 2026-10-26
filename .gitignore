@@ -21,3 +21,6 @@ Thumbs.db
 
 # engine-generated plugin types
 .claude-plugin/types/
+
+# claude code write tracking
+.claude/.cc-writes/

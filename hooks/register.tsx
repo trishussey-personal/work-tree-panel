@@ -12,6 +12,32 @@ const MAX_ROWS = 2000
 const MAX_CHARS = 80_000
 const POLL_MS = 5000
 const AFTER_TOOL_MS = 300
+// Bounds what is kept in $.state and compared on every poll.
+const MAX_CHANGES = 5000
+
+// C0 and C1 controls (the engine refuses a tree holding one) and bidi
+// overrides (a shown name could differ from the copied one).
+const UNSAFE_CHARS = /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/
+const UNSAFE_CHARS_ALL = new RegExp(UNSAFE_CHARS.source, 'g')
+
+// Repo content (file names, commit subjects, branch names) as it is drawn.
+export function shown(text: string) {
+  return text.replace(UNSAFE_CHARS_ALL, '\uFFFD')
+}
+
+export function isCopySafe(text: string) {
+  return !UNSAFE_CHARS.test(text)
+}
+
+// Settings a repo's own config could use to run commands from these
+// background calls. Hooks are already off for every engine git call.
+const SAFE_GIT = [
+  '-c',
+  'core.fsmonitor=false',
+  '-c',
+  'log.showSignature=false',
+  '--no-optional-locks',
+]
 
 const NO_GIT: GitSnapshot = {
   isRepo: false,
@@ -25,6 +51,7 @@ const NO_GIT: GitSnapshot = {
   lastCommit: '',
   changes: {},
   total: 0,
+  note: '',
 }
 
 const root = atom({ plugin: 'work-tree-panel', key: 'root' } as const, '')
@@ -36,34 +63,73 @@ const expanded = atom(
   { shape: 'expanded-1' },
 )
 const git = atom({ plugin: 'work-tree-panel', key: 'git' } as const, NO_GIT, {
-  shape: 'git-2',
+  shape: 'git-3',
 })
 
 type Run = (
   argv: readonly string[],
 ) => Promise<{ exitCode: number; stdout: string; isStdoutTruncated?: boolean }>
 
+// `-c` settings that blank every filter driver the repo configures: status
+// runs a filter's clean command when it re-reads a file.
+export function filtersOff(configNames: string) {
+  const names = new Set<string>()
+  for (const key of configNames.split('\0')) {
+    const name = key.slice('filter.'.length, key.lastIndexOf('.'))
+    if (key.startsWith('filter.') && name) names.add(name)
+  }
+
+  return [...names].flatMap(name => [
+    '-c',
+    `filter.${name}.clean=`,
+    '-c',
+    `filter.${name}.smudge=`,
+    '-c',
+    `filter.${name}.process=`,
+    '-c',
+    `filter.${name}.required=false`,
+  ])
+}
+
 // Rejects when git status fails or is cut short, so the caller keeps the last
 // good snapshot instead of drawing a false "clean".
 export async function readGit(run: Run): Promise<GitSnapshot> {
-  const where = await run(['git', 'rev-parse', '--show-toplevel', '--show-prefix'])
-  if (where.exitCode !== 0) return NO_GIT
-  const [top = '', prefix = ''] = where.stdout.split('\n')
-
-  const [status, log] = await Promise.all([
-    run(['git', 'status', '--porcelain=v1', '--branch', '-z', '--untracked-files=all']),
-    run(['git', 'log', '-1', '--format=%h %s']),
+  const [top, prefix] = await Promise.all([
+    run(['git', ...SAFE_GIT, 'rev-parse', '--show-toplevel']),
+    run(['git', ...SAFE_GIT, 'rev-parse', '--show-prefix']),
   ])
+  if (top.exitCode !== 0 || prefix.exitCode !== 0) return NO_GIT
+  const topDir = top.stdout.replace(/\n$/, '')
+  const subDir = prefix.stdout.replace(/\n$/, '')
+
+  const filters = await run(['git', ...SAFE_GIT, 'config', '-z', '--name-only', '--get-regexp', '^filter\\.'])
+  const runGit = (...args: string[]) =>
+    run(['git', ...SAFE_GIT, ...filtersOff(filters.exitCode === 0 ? filters.stdout : ''), ...args])
+  const statusArgs = ['status', '--porcelain=v1', '--branch', '-z', '--ignore-submodules=dirty']
+
+  const [first, log] = await Promise.all([
+    runGit(...statusArgs, '--untracked-files=all'),
+    runGit('log', '-1', '--format=%h %s'),
+  ])
+  let status = first
+  let note = ''
+  if (status.exitCode === 0 && status.isStdoutTruncated) {
+    // Too many untracked files to list one by one: list their folders.
+    status = await runGit(...statusArgs, '--untracked-files=normal')
+    note = 'Untracked files are grouped by folder: too many to list.'
+  }
   if (status.exitCode !== 0) throw new Error(`git status exited ${status.exitCode}`)
-  if (status.isStdoutTruncated) throw new Error('git status output was truncated')
+  if (status.isStdoutTruncated) throw new Error('too many changes to read')
 
   const snapshot: GitSnapshot = {
     ...NO_GIT,
     isRepo: true,
-    repo: top.split('/').pop() ?? top,
+    repo: topDir.split('/').pop() ?? topDir,
     lastCommit: log.exitCode === 0 ? log.stdout.trim() : '',
     changes: {},
+    note,
   }
+  let kept = 0
 
   const items = status.stdout.split('\0')
   for (let i = 0; i < items.length; i++) {
@@ -79,8 +145,13 @@ export async function readGit(run: Run): Promise<GitSnapshot> {
     // A rename or copy, staged or not, is followed by its original path.
     if (x === 'R' || x === 'C' || y === 'R' || y === 'C') i++
     snapshot.total++
-    if (!path.startsWith(prefix)) continue
-    snapshot.changes[path.slice(prefix.length)] = statusCode(x, y)
+    if (!path.startsWith(subDir)) continue
+    if (kept >= MAX_CHANGES) {
+      snapshot.note = `Status marks shown for the first ${MAX_CHANGES} changed files.`
+      continue
+    }
+    snapshot.changes[path.slice(subDir.length)] = statusCode(x, y)
+    kept++
   }
 
   return snapshot
@@ -139,8 +210,15 @@ async function refresh($: EngineInterface, force: boolean) {
     if (force || JSON.stringify(current) !== JSON.stringify(next)) {
       await update($, git, () => next)
     }
-  } catch {
-    // A failed git call leaves the last snapshot showing.
+  } catch (error) {
+    // A failed git call leaves the last snapshot showing, with a note.
+    const note = `Git status unavailable: ${error instanceof Error ? error.message : String(error)}`
+    try {
+      const current = await read($, git)
+      if (current.note !== note) await update($, git, last => ({ ...last, note }))
+    } catch {
+      // Nothing more to show.
+    }
   } finally {
     isRefreshing = false
     const again = pending
@@ -154,12 +232,24 @@ let afterToolTimer: { cancel: () => void } | undefined
 // attached, or from /files. Until then nothing polls or runs git.
 let isWatching = false
 
+// Background refreshes run git only while a surface draws the pane; /files
+// refreshes it again when the pane comes back.
+async function refreshIfShown($: EngineInterface, force: boolean) {
+  try {
+    const panes = await $.ui.panes()
+    if (!panes.some(pane => pane.id === PANE && pane.isPlaced)) return
+  } catch {
+    return
+  }
+  await refresh($, force)
+}
+
 // Answers false when already watching.
 function watch($: EngineInterface) {
   if (isWatching) return false
   isWatching = true
   void refresh($, true)
-  $.clock.every(POLL_MS, () => void refresh($, false))
+  $.clock.every(POLL_MS, () => void refreshIfShown($, false))
 
   return true
 }
@@ -168,7 +258,7 @@ function refreshSoon($: EngineInterface) {
   if (!isWatching) return
   // Parallel tool calls share one refresh.
   afterToolTimer?.cancel()
-  afterToolTimer = $.clock.after(AFTER_TOOL_MS, () => void refresh($, true))
+  afterToolTimer = $.clock.after(AFTER_TOOL_MS, () => void refreshIfShown($, true))
 }
 
 type Entry = { name: string; kind: 'file' | 'dir' | 'other'; isGone: boolean }
@@ -241,6 +331,11 @@ export const register: Register = on => {
       )
     const copy = (rel: string) => async (press: { surface: typeof e.surface }) => {
       if (!rel) return
+      // A newline would run a second command when pasted into a shell.
+      if (!isCopySafe(rel)) {
+        $.ui.toast('Not copied: the name holds control or text-direction characters.')
+        return
+      }
       const copied = await $.ui.copy({ text: rel, surface: press.surface })
       $.ui.toast(copied.isCopied ? `Copied ${rel}` : `Could not copy: ${copied.reason}`)
     }
@@ -277,20 +372,22 @@ export const register: Register = on => {
           return
         }
         const rel = dir ? `${dir}/${entry.name}` : entry.name
+        const label = shown(entry.name)
+        const key = shown(rel)
         const code = info.changes[rel]
-        chars += indent.length + entry.name.length + 10
+        chars += indent.length + label.length + 10
         if (entry.kind === 'dir') {
           const isOpen = open.has(rel)
           rows.push(
             <Box flexDirection="row">
               {depth > 0 && <Text>{indent}</Text>}
-              <Button key={`d:${rel}`} plain onPress={toggle(rel)}>
+              <Button key={`d:${key}`} plain onPress={toggle(rel)}>
                 {isOpen ? '▾ ' : '▸ '}
-                <Text strikethrough={entry.isGone}>{entry.name}/</Text>
+                <Text strikethrough={entry.isGone}>{label}/</Text>
                 {code && <Text color={statusColor(code)}> {code}</Text>}
                 {!code && dirtyDirs.has(rel) && <Text color="warning"> •</Text>}
               </Button>
-              <Button key={`c:${rel}`} plain onPress={copy(rel)}>
+              <Button key={`c:${key}`} plain onPress={copy(rel)}>
                 <Text dimColor> copy</Text>
               </Button>
             </Box>,
@@ -300,9 +397,9 @@ export const register: Register = on => {
           rows.push(
             <Box flexDirection="row">
               {depth > 0 && <Text>{indent}</Text>}
-              <Button key={`f:${rel}`} plain onPress={copy(rel)}>
+              <Button key={`f:${key}`} plain onPress={copy(rel)}>
                 {'  '}
-                <Text strikethrough={entry.isGone}>{entry.name}</Text>
+                <Text strikethrough={entry.isGone}>{label}</Text>
                 {code && <Text color={statusColor(code)}> {code}</Text>}
               </Button>
             </Box>,
@@ -312,15 +409,15 @@ export const register: Register = on => {
     }
     if (cwd) await walk('', 0)
 
-    const folder = cwd.split('/').pop() || cwd
+    const folder = shown(cwd.split('/').pop() || cwd)
 
     return (
       <Box flexDirection="column">
         {info.isRepo ? (
           <Box flexDirection="column">
             <Text wrap="truncate-end">
-              <Text bold>{info.repo}</Text>
-              <Text color="suggestion"> {info.branch}</Text>
+              <Text bold>{shown(info.repo)}</Text>
+              <Text color="suggestion"> {shown(info.branch)}</Text>
               {info.ahead > 0 && <Text color="success"> ↑{info.ahead}</Text>}
               {info.behind > 0 && <Text color="warning"> ↓{info.behind}</Text>}
               {info.isUpstreamGone && <Text color="warning"> (upstream gone)</Text>}
@@ -330,7 +427,7 @@ export const register: Register = on => {
             </Text>
             {info.lastCommit && (
               <Text dimColor wrap="truncate-end">
-                {info.lastCommit}
+                {shown(info.lastCommit)}
               </Text>
             )}
             <Text color={info.total > 0 ? 'warning' : 'success'}>
@@ -342,9 +439,10 @@ export const register: Register = on => {
         ) : (
           <Box flexDirection="column">
             <Text bold>{folder}</Text>
-            <Text dimColor>Not a git repository</Text>
+            {!info.note && <Text dimColor>Not a git repository</Text>}
           </Box>
         )}
+        {info.note && <Text color="warning">{shown(info.note)}</Text>}
         <Box flexDirection="row">
           <Button key="refresh" hotkey="r" plain onPress={() => void refresh($, true)}>
             <Text dimColor>refresh</Text>
