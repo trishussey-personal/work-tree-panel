@@ -1,0 +1,5 @@
+{
+  "name": "work-tree-panel",
+  "owner": { "name": "Tris Hussey" },
+  "plugins": [{ "name": "work-tree-panel", "source": "./" }]
+}

@@ -2,6 +2,24 @@
 
 A Claude Code mod that adds a **Files** pane beside the chat. It shows the file tree of the folder Claude is working in, together with that folder's git status, so you can see what Claude is changing as it goes.
 
+## Install
+
+At the prompt of a Claude Code terminal session:
+
+```
+/plugin install work-tree-panel --marketplace trishussey-personal/work-tree-panel
+```
+
+Answer `y` to add the marketplace, then pick a scope (user scope loads it in every session). From a shell instead:
+
+```
+claude plugin install work-tree-panel --marketplace trishussey-personal/work-tree-panel
+```
+
+In the desktop app: click + next to the prompt box, then Plugins, Add marketplace with `trishussey-personal/work-tree-panel`, then Add plugin.
+
+The repository is private: installing needs read access on GitHub and a git credential for github.com already on the machine (an SSH key, or `gh auth login` then `gh auth setup-git`).
+
 ## What it shows
 
 - **The repo header:** the repository name, the current branch, how many commits it is ahead of or behind its upstream, the last commit, and the number of changed files (or "Working tree clean"). Outside a git repository it says so.
