@@ -1,0 +1,20 @@
+# secrets
+.env
+.env.*
+!.env.example
+
+# generated work — keep the folders, ignore the contents
+active/*
+!active/.gitkeep
+!active/.tmp/
+active/.tmp/*
+!active/.tmp/.gitkeep
+
+# os / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# claude local
+.claude/settings.local.json
