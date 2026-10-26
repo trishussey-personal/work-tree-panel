@@ -3,12 +3,8 @@
 .env.*
 !.env.example
 
-# generated work — keep the folders, ignore the contents
-active/*
-!active/.gitkeep
-!active/.tmp/
-active/.tmp/*
-!active/.tmp/.gitkeep
+# local scratch and generated work
+active/
 
 # os / editor
 .DS_Store
