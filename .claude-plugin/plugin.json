@@ -1,0 +1,7 @@
+{
+  "name": "work-tree-panel",
+  "version": "0.1.0",
+  "description": "A side pane showing the working directory's file tree with git repo, branch and change status; folders expand, paths copy.",
+  "license": "MIT",
+  "types": "./types/index.d.ts"
+}

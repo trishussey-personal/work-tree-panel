@@ -4,7 +4,14 @@ Project-level instructions for Claude Code, loaded at the start of every session
 
 ## Workspace map
 
-work-tree-panel: a Claude Code mod that adds a side panel showing the project's git worktrees and what is running in each.
+work-tree-panel: a Claude Code mod (plugin of function hooks) that adds a "Files" side pane: the session's working-directory file tree with git repo, branch, ahead/behind, last commit and per-file change status. Folders expand on press; files and folders copy their relative path.
+
+- `.claude-plugin/plugin.json` — manifest; `types` points at the state contract.
+- `hooks/hooks.json` → `hooks/register.tsx` — the whole mod: git snapshot (`readGit`), refresh timer, `/files` command, the Pane render hook.
+- `types/index.d.ts` — `$.state` contract (`root`, `expanded`, `git`). Bump an atom's `shape` tag when its value's fields change.
+- `tests/pane.test.tsx` — `claude plugin test .`
+- `tsconfig.json` — extends `.claude-plugin/types/tsconfig.json`, which the engine writes when it loads the mod (gitignored).
+- `README.md` — user-facing docs; the plugin directory requires it. `LICENSE` is MIT (also `license` in plugin.json).
 
 Project is new. Develop for a while before adding preferences; encode friction you have actually hit, not friction you expect.
 
@@ -26,9 +33,15 @@ Fixed locations:
 
 ## Capabilities
 
-- Nothing project-specific declared yet — add entries as tools and scripts are created.
+- `claude plugin validate .` — checks the manifest and hooks module as the engine will load them, plus plugin-directory submission checks.
+- `claude plugin test .` — runs `tests/*.test.tsx`.
+- Type check: `tsc -p .` once the engine has laid `.claude-plugin/types/` (it does on load); otherwise a scratch tsconfig per the header of the plugin-authoring skill's `claude-code.d.ts`. No global `tsc`: use `npx -p typescript@5.6.3 tsc` with `npm_config_cache=$TMPDIR/npm-cache` (the sandbox blocks `~/.npm`).
+- Try it live: `claude --plugin-dir .` from this folder.
 - Default autonomy: for a well-scoped task, plan it, build it, validate it, and report back. Do not check in mid-task on implementation details that do not change the request's scope.
 
 ## Lab notes: what not to do
 
-- 2026-10-25: (empty — first entry goes here)
+- 2026-10-25: Don't pass `$` to a closure defined inside `register`; the validator refuses it. A helper that takes `$` must be a top-level function declaration (or a const bound to one).
+- 2026-10-25: Bash in the sandbox can't write to `~/.claude/dev-mods/`, where a hot-reloading session copy of the mod lives. Edit those files with the Edit/Write tools, not sed or python.
+- 2026-10-25: Don't assume `git status --porcelain` puts renames only in the first (X) column. An unstaged rename after `git add -N` is ` R new\0old`, so check both columns before skipping the original path. Check for unmerged codes (`U` in either column, `AA`, `DD`) before any "D wins" rule.
+- 2026-10-25: Don't gate background work on `e.isInteractive` alone; the desktop app may attach a surface while not counting as interactive. Use `e.isInteractive || e.surface !== null`, and start polling from the command too.
