@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { filtersOff, isCopySafe, parseBranch, readGit, shown } from '../hooks/register'
+import { filtersOff, isCopySafe, keyOf, parseBranch, readGit, shown } from '../hooks/register'
 
 const PANE = {
   plugin: 'work-tree-panel',
@@ -192,7 +192,12 @@ test('every git call switches off config that could run commands', async () => {
   const calls: (readonly string[])[] = []
   await readGit(async argv => {
     calls.push(argv)
-    if (sub(argv) === 'config') return { exitCode: 0, stdout: 'filter.lfs.clean\0filter.lfs.smudge\0filter.evil.process\0' }
+    if (sub(argv) === 'config') {
+      return {
+        exitCode: 0,
+        stdout: 'global\0filter.lfs.clean\0local\0filter.evil.clean\0local\0filter.evil.process\0',
+      }
+    }
     return fakeGit(argv)
   })
 
@@ -202,15 +207,66 @@ test('every git call switches off config that could run commands', async () => {
   }
   const status = calls.find(argv => sub(argv) === 'status') ?? []
   expect(status).toContain('filter.evil.clean=')
-  expect(status).toContain('filter.lfs.process=')
+  // The person's own global filters keep working.
+  expect(status.some(arg => arg.startsWith('filter.lfs'))).toBe(false)
+  for (const argv of calls) expect(argv).toContain('protocol.allow=never')
   expect(status).toContain('--ignore-submodules=dirty')
   const log = calls.find(argv => sub(argv) === 'log') ?? []
   expect(log).toContain('log.showSignature=false')
 })
 
-test('filter names with dots are blanked whole', () => {
-  expect(filtersOff('filter.a.b.clean\0')).toContain('filter.a.b.clean=')
+test('filter names with dots are blanked whole; a name with = fails closed', () => {
+  expect(filtersOff('local\0filter.a.b.clean\0')).toContain('filter.a.b.clean=')
+  expect(filtersOff('worktree\0filter.w.clean\0')).toContain('filter.w.clean=')
   expect(filtersOff('')).toEqual([])
+  expect(() => filtersOff('local\0filter.a=b.clean\0')).toThrow()
+})
+
+test('a repo filter that cannot be switched off stops git status from running', async () => {
+  const ran: string[] = []
+  const read = readGit(async argv => {
+    ran.push(sub(argv) ?? '')
+    if (sub(argv) === 'config') return { exitCode: 0, stdout: 'local\0filter.a=b.clean\0' }
+    return fakeGit(argv)
+  })
+
+  await expect(read).rejects.toThrow()
+  expect(ran).not.toContain('status')
+})
+
+test('a failed filter listing fails closed; exit 1 means none', async () => {
+  const failed = readGit(async argv =>
+    sub(argv) === 'config' ? { exitCode: 129, stdout: '' } : fakeGit(argv),
+  )
+  await expect(failed).rejects.toThrow()
+
+  const none = await readGit(async argv => (sub(argv) === 'config' ? { exitCode: 1, stdout: '' } : fakeGit(argv)))
+  expect(none.isRepo).toBe(true)
+})
+
+test('a truncated filter list fails closed', async () => {
+  const read = readGit(async argv =>
+    sub(argv) === 'config' ? { exitCode: 0, stdout: 'local\0filter.x.clean\0', isStdoutTruncated: true } : fakeGit(argv),
+  )
+
+  await expect(read).rejects.toThrow()
+})
+
+test('once grouped, later runs start from the grouped listing', async () => {
+  const modes: string[] = []
+  const snapshot = await readGit(async argv => {
+    if (sub(argv) === 'status') modes.push(argv.find(arg => arg.startsWith('--untracked-files')) ?? '')
+    return fakeGit(argv)
+  }, true)
+
+  expect(modes).toEqual(['--untracked-files=normal'])
+  expect(snapshot.note).toMatch(/grouped by folder/)
+})
+
+test('keys are one to one where shown names collide', () => {
+  const names = ['a\nb', 'a\rb', 'a\uFFFDb', 'a\\u000ab']
+  expect(new Set(names.map(keyOf)).size).toBe(names.length)
+  expect(keyOf('src/app.ts')).toBe('src/app.ts')
 })
 
 test('too many untracked files falls back to listing their folders', async () => {
@@ -276,10 +332,30 @@ test('a hostile file name and commit subject still draw, and the name is not cop
   await ui.press({ key: 'refresh' })
 
   expect((await ui.find({ type: 'Text', text: /subject/ }))?.text).toContain('\uFFFD')
-  const key = `f:${shown(hostile)}`
+  const key = `f:${keyOf(hostile)}`
   expect(await ui.find({ key })).toBeDefined()
   await ui.press({ key })
   expect(copied).toEqual([])
   expect(toasts.at(-1)).toMatch(/Not copied/)
+  await ui.unmount()
+})
+
+test('git runs with lazy fetch off', async ($, on) => {
+  const envs: unknown[] = []
+  on('command.register', () => ({ value: { command: 'files' } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('process.run', (_, e) => {
+    envs.push(e.init?.env)
+    return { value: { ...fakeGit(e.argv), isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  on('fs.list', () => ({ value: [] }))
+
+  await $.session.start({ cwd: '/code/demo', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'refresh' })
+
+  expect(envs.length).toBeGreaterThan(0)
+  for (const env of envs) expect(env).toEqual({ GIT_NO_LAZY_FETCH: '1', GIT_ALLOW_PROTOCOL: 'none' })
   await ui.unmount()
 })

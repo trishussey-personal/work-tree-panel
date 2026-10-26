@@ -38,7 +38,7 @@ Copying uses your system's clipboard tool, or the OSC 52 escape code over SSH, w
 
 - Symlinked folders show as files and can't be expanded.
 - A name holding control characters (a newline, an escape) or text-direction overrides is shown with `�` in their place, and its path is not copied: pasted into a shell, it could run more than you see.
-- Git runs with settings that would let a repo run commands switched off (fsmonitor, filter drivers, signature checks) and without taking `.git/index.lock`, so the background refresh never blocks your own git commands. It refreshes only while the pane is on screen.
+- Git runs with the settings a repo could use to run commands switched off: fsmonitor, signature checks, fetching of any kind (including a partial clone's lazy fetch), and any filter driver the repo's own config defines. Your global filters, such as git-lfs, still work. If a repo defines a filter whose name can't be switched off safely, the pane shows no git status for it. Git never takes `.git/index.lock`, so the background refresh can't block your own git commands. It refreshes only while the pane is on screen.
 - Very large expanded trees are cut off at about 2,000 rows, with a note asking you to collapse a folder.
 - Which folders are expanded is remembered for the session, not across sessions.
 

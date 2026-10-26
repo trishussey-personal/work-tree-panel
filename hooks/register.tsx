@@ -36,8 +36,25 @@ const SAFE_GIT = [
   'core.fsmonitor=false',
   '-c',
   'log.showSignature=false',
+  // A partial clone would lazily fetch missing objects through a remote
+  // command the repo chooses. The repo's own protocol.<name>.allow outranks
+  // this; SAFE_GIT_ENV is what blocks the fetch.
+  '-c',
+  'protocol.allow=never',
   '--no-optional-locks',
 ]
+// Merged over the host environment for every call. GIT_NO_LAZY_FETCH (git
+// 2.44+) stops the fetch; GIT_ALLOW_PROTOCOL (git 2.12+) outranks the repo's
+// protocol settings, so no transport can start even on older git.
+export const SAFE_GIT_ENV = { GIT_NO_LAZY_FETCH: '1', GIT_ALLOW_PROTOCOL: 'none' }
+
+// A Button key per path, one to one: backslash and unsafe characters become
+// \uXXXX, so no two paths share a key.
+export function keyOf(rel: string) {
+  return rel.replace(/[\\\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, c =>
+    `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`,
+  )
+}
 
 const NO_GIT: GitSnapshot = {
   isRepo: false,
@@ -70,13 +87,22 @@ type Run = (
   argv: readonly string[],
 ) => Promise<{ exitCode: number; stdout: string; isStdoutTruncated?: boolean }>
 
-// `-c` settings that blank every filter driver the repo configures: status
-// runs a filter's clean command when it re-reads a file.
-export function filtersOff(configNames: string) {
+// `-c` settings that blank each filter driver the repo itself defines (local
+// or worktree config): status runs a filter's clean command when it re-reads
+// a file. The person's own global filters (git-lfs) are left to work.
+// `scoped` is `git config --show-scope -z --name-only` output: scope, name.
+export function filtersOff(scoped: string) {
   const names = new Set<string>()
-  for (const key of configNames.split('\0')) {
+  const parts = scoped.split('\0')
+  for (let i = 0; i + 1 < parts.length; i += 2) {
+    const scope = parts[i]
+    const key = parts[i + 1] ?? ''
+    if (scope !== 'local' && scope !== 'worktree') continue
     const name = key.slice('filter.'.length, key.lastIndexOf('.'))
-    if (key.startsWith('filter.') && name) names.add(name)
+    if (!key.startsWith('filter.') || !name) continue
+    // `-c` splits at the first `=`, so such a name cannot be blanked.
+    if (name.includes('=')) throw new Error('this repo defines a filter that cannot be switched off safely')
+    names.add(name)
   }
 
   return [...names].flatMap(name => [
@@ -93,7 +119,9 @@ export function filtersOff(configNames: string) {
 
 // Rejects when git status fails or is cut short, so the caller keeps the last
 // good snapshot instead of drawing a false "clean".
-export async function readGit(run: Run): Promise<GitSnapshot> {
+// `startGrouped` skips the per-file untracked listing a previous run found
+// too large.
+export async function readGit(run: Run, startGrouped = false): Promise<GitSnapshot> {
   const [top, prefix] = await Promise.all([
     run(['git', ...SAFE_GIT, 'rev-parse', '--show-toplevel']),
     run(['git', ...SAFE_GIT, 'rev-parse', '--show-prefix']),
@@ -102,21 +130,34 @@ export async function readGit(run: Run): Promise<GitSnapshot> {
   const topDir = top.stdout.replace(/\n$/, '')
   const subDir = prefix.stdout.replace(/\n$/, '')
 
-  const filters = await run(['git', ...SAFE_GIT, 'config', '-z', '--name-only', '--get-regexp', '^filter\\.'])
-  const runGit = (...args: string[]) =>
-    run(['git', ...SAFE_GIT, ...filtersOff(filters.exitCode === 0 ? filters.stdout : ''), ...args])
+  const filters = await run([
+    'git',
+    ...SAFE_GIT,
+    'config',
+    '--show-scope',
+    '-z',
+    '--name-only',
+    '--get-regexp',
+    '^filter\\.',
+  ])
+  if (filters.isStdoutTruncated) throw new Error('too many filters to switch off')
+  // Exit 1 means no filter is defined; anything else means the list is unknown.
+  if (filters.exitCode !== 0 && filters.exitCode !== 1) throw new Error('could not list the repo filters')
+  const off = filtersOff(filters.exitCode === 0 ? filters.stdout : '')
+  const runGit = (...args: string[]) => run(['git', ...SAFE_GIT, ...off, ...args])
   const statusArgs = ['status', '--porcelain=v1', '--branch', '-z', '--ignore-submodules=dirty']
+  const grouped = 'Untracked files are grouped by folder: too many to list.'
 
   const [first, log] = await Promise.all([
-    runGit(...statusArgs, '--untracked-files=all'),
+    runGit(...statusArgs, startGrouped ? '--untracked-files=normal' : '--untracked-files=all'),
     runGit('log', '-1', '--format=%h %s'),
   ])
   let status = first
-  let note = ''
-  if (status.exitCode === 0 && status.isStdoutTruncated) {
+  let note = startGrouped ? grouped : ''
+  if (!startGrouped && status.exitCode === 0 && status.isStdoutTruncated) {
     // Too many untracked files to list one by one: list their folders.
     status = await runGit(...statusArgs, '--untracked-files=normal')
-    note = 'Untracked files are grouped by folder: too many to list.'
+    note = grouped
   }
   if (status.exitCode !== 0) throw new Error(`git status exited ${status.exitCode}`)
   if (status.isStdoutTruncated) throw new Error('too many changes to read')
@@ -147,7 +188,8 @@ export async function readGit(run: Run): Promise<GitSnapshot> {
     snapshot.total++
     if (!path.startsWith(subDir)) continue
     if (kept >= MAX_CHANGES) {
-      snapshot.note = `Status marks shown for the first ${MAX_CHANGES} changed files.`
+      const capped = `Status marks shown for the first ${MAX_CHANGES} changed files.`
+      snapshot.note = note ? `${note} ${capped}` : capped
       continue
     }
     snapshot.changes[path.slice(subDir.length)] = statusCode(x, y)
@@ -192,6 +234,11 @@ function statusColor(code: string) {
 
 let isRefreshing = false
 let pending: { force: boolean } | undefined
+// Set once a run found too many untracked files to list one by one; the full
+// listing is tried again every GROUPED_RETRY runs, in case the pile is gone.
+let isGrouped = false
+let groupedRuns = 0
+const GROUPED_RETRY = 12
 
 // `force` writes even when nothing changed, so the tree re-lists after a
 // tool that may have touched files git does not track. A request that comes
@@ -205,7 +252,12 @@ async function refresh($: EngineInterface, force: boolean) {
   try {
     const cwd = await read($, root)
     if (!cwd) return
-    const next = await readGit(argv => $.process.run(argv, { cwd, timeoutMs: 10_000 }))
+    groupedRuns = isGrouped ? groupedRuns + 1 : 0
+    const next = await readGit(
+      argv => $.process.run(argv, { cwd, env: SAFE_GIT_ENV, timeoutMs: 10_000 }),
+      isGrouped && groupedRuns % GROUPED_RETRY !== 0,
+    )
+    isGrouped = next.note.startsWith('Untracked files are grouped')
     const current = await read($, git)
     if (force || JSON.stringify(current) !== JSON.stringify(next)) {
       await update($, git, () => next)
@@ -373,7 +425,7 @@ export const register: Register = on => {
         }
         const rel = dir ? `${dir}/${entry.name}` : entry.name
         const label = shown(entry.name)
-        const key = shown(rel)
+        const key = keyOf(rel)
         const code = info.changes[rel]
         chars += indent.length + label.length + 10
         if (entry.kind === 'dir') {
